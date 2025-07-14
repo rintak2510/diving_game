@@ -7,6 +7,8 @@
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 #include <iostream>
@@ -43,6 +45,7 @@ int spinCount = 0;
 float velocityY = 0.0f;
 float velocityZ = 0.2f;
 float playerRotationSpeed = 0.0f;
+const float waterY = 0.0f;
 
 bool jumpSuccess = true;
 
@@ -88,6 +91,31 @@ bool loadModel(const std::string& filename) {
     return true;
 }
 
+std::map<std::string, GLuint> resultTextures;
+
+GLuint loadTexture(const std::string& path) {
+    int width, height, channels;
+    stbi_set_flip_vertically_on_load(true); // PNGは上下反転しているので、読み込み時に反転する
+    unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!data) {
+        std::cerr << "Failed to load PNG: " << path << std::endl;
+        return 0;
+    }
+
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, data);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    stbi_image_free(data);
+    return textureID;
+}
+
 //=== 描画関数 ===
 void drawCube(float scale = 1.0f) {
     glScalef(scale, scale, scale);
@@ -115,15 +143,21 @@ void drawCube(float scale = 1.0f) {
 }
 
 void drawModel(float scale = 1.0f) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glPushMatrix();
     glScalef(scale, scale, scale);
     glBegin(GL_TRIANGLES);
     for (size_t i = 0; i < modelVertices.size(); i += 3) {
+        float vy = modelVertices[i + 1] * scale + player.position.y;
+        float alpha = (vy < waterY) ? 0.3f : 1.0f;  // 下に潜ってたら薄くする
+        glColor4f(1.0f, 0.8f, 0.2f, alpha);         // 半透明の色設定
         glNormal3f(modelNormals[i], modelNormals[i+1], modelNormals[i+2]);
         glVertex3f(modelVertices[i], modelVertices[i+1], modelVertices[i+2]);
     }
     glEnd();
     glPopMatrix();
+    glDisable(GL_BLEND);
 }
 
 void drawPlayer() {
@@ -200,6 +234,38 @@ void drawWaterSurface() {
     glDisable(GL_BLEND);
 }
 
+void drawResultImage(GLuint textureID, int screenWidth, int screenHeight) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, screenWidth, 0, screenHeight, -1, 1);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glColor4f(1, 1, 1, 1);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(0, 0);
+    glTexCoord2f(1, 0); glVertex2f(screenWidth, 0);
+    glTexCoord2f(1, 1); glVertex2f(screenWidth, screenHeight);
+    glTexCoord2f(0, 1); glVertex2f(0, screenHeight);
+    glEnd();
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    
+    glDisable(GL_BLEND);
+    glDisable(GL_TEXTURE_2D);
+}
+
 void setupCamera() {
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
@@ -208,7 +274,10 @@ void setupCamera() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    glm::vec3 eye = player.position + glm::vec3(0, 1.0, -3.0);
+    float cameraY = std::max(player.position.y, 0.0f); // y < 0 のときは 0 固定！
+    glm::vec3 eye = glm::vec3(player.position.x, cameraY + 1.0f, player.position.z - 3.0f);
+    glm::vec3 center = glm::vec3(player.position.x, cameraY, player.position.z);
+
     gluLookAt(eye.x, eye.y, eye.z,
               player.position.x, player.position.y, player.position.z,
               0, 1, 0);
@@ -235,8 +304,8 @@ void updateGame(GLFWwindow* window, float deltaTime) {
             if (zone > 6 || glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
                 // ジャンプ条件チェック
                 jumpSuccess = true;
-                float upperLimit = 305.0f; // 上限制限（積）
-                float lowerLimitPerSpin = 12.0f; // 回転数ごとの最低ジャンプ力
+                float upperLimit = 305.0f;
+                float lowerLimitPerSpin = 12.0f;
                 if (jumpGauge * spinCount > upperLimit)
                     jumpGauge = upperLimit / std::max(spinCount, 1);
                 if (jumpGauge < lowerLimitPerSpin * spinCount)
@@ -244,13 +313,14 @@ void updateGame(GLFWwindow* window, float deltaTime) {
 
                 currentState = GameState::Jumping;
                 velocityY = jumpSuccess ? jumpGauge * 0.05f : 0.0f;
-                // 回転速度の調整
+
                 if (jumpSuccess) {
                     float g = 9.8f;
                     float airtime = 2.0f * velocityY / g;
                     float totalRotation = 360.0f * spinCount;
-                    player.rotationX = 0.0f; // 初期化
-                    playerRotationSpeed = totalRotation / airtime; // ← この変数を追加
+                    player.rotationX = 0.0f;
+                    playerRotationSpeed = totalRotation / airtime;
+                    // playerRotationSpeed を使わず、後で airtime と jumpElapsedTime で制御
                 } else {
                     playerRotationSpeed = 0.0f;
                 }
@@ -259,20 +329,39 @@ void updateGame(GLFWwindow* window, float deltaTime) {
         }
 
         case GameState::Jumping:
-        case GameState::Falling:
+        case GameState::Falling: {
+            static float jumpElapsedTime = 0.0f;
+            static float airtime = 0.0f;
+            static float totalRotation = 0.0f;
+            static bool initialized = false;
+
+            if (!initialized) {
+                airtime = 2.0f * velocityY / 9.8f;
+                totalRotation = 360.0f * spinCount;
+                jumpElapsedTime = 0.0f;
+                initialized = true;
+            }
+
             velocityY -= deltaTime * 9.8f;
             player.position.y += velocityY * deltaTime;
-            player.position.z += velocityZ * deltaTime; // 水平方向の移動は固定値
-            if (jumpSuccess)
-                player.rotationX += playerRotationSpeed * deltaTime;
-            if (currentState == GameState::Jumping && velocityY < 0.0f)
-                currentState = GameState::Falling;
-            if (player.position.y <= 0.0f) {
-                player.position.y = 0.0f;
+            player.position.z += velocityZ * deltaTime;
+
+            if (jumpSuccess) {
+                jumpElapsedTime += deltaTime;
+                float t = std::min(jumpElapsedTime, airtime);
+                player.rotationX = totalRotation * (t / airtime);
+            }
+
+            if (player.position.y <= -1.0f) {
+                player.position.y = -1.0f;
+                playerRotationSpeed = 0.0f;
+                initialized = false;
                 currentState = GameState::Result;
                 std::cout << "Result: " << (jumpSuccess ? (spinCount == 0 ? "Fail" : std::to_string(spinCount) + "回転") : "回転失敗") << std::endl;
             }
+
             break;
+        }
 
         case GameState::Result:
             if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
@@ -282,6 +371,7 @@ void updateGame(GLFWwindow* window, float deltaTime) {
                 spinCount = 0;
                 velocityY = 0.0f;
                 jumpSuccess = true;
+                playerRotationSpeed = 0.0f;
                 currentState = GameState::Gauge_Height;
             }
             break;
@@ -301,6 +391,13 @@ int main() {
         std::cerr << "モデルの読み込みに失敗しました" << std::endl;
         return -1;
     }
+
+    resultTextures["Failure"]    = loadTexture("assets/failure.png");
+    resultTextures["Single"]     = loadTexture("assets/single_spin.png");
+    resultTextures["Double"]     = loadTexture("assets/double_spin.png");
+    resultTextures["Triple"]     = loadTexture("assets/triple_spin.png");
+    resultTextures["Quad"]       = loadTexture("assets/quad_spin.png");
+    resultTextures["Quintuple"]  = loadTexture("assets/quintple_spin.png");
 
     glewExperimental = GL_TRUE;
     glewInit();
@@ -326,6 +423,23 @@ int main() {
         drawWaterSurface();
         drawPlayer();
 
+        if (currentState == GameState::Result) {
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+
+            if (!jumpSuccess) {
+                drawResultImage(resultTextures["Failure"], width, height);
+            } else {
+                switch (spinCount) {
+                    case 1: drawResultImage(resultTextures["Single"], width, height); break;
+                    case 2: drawResultImage(resultTextures["Double"], width, height); break;
+                    case 3: drawResultImage(resultTextures["Triple"], width, height); break;
+                    case 4: drawResultImage(resultTextures["Quad"], width, height); break;
+                    case 5: drawResultImage(resultTextures["Quintuple"], width, height); break;
+                    default: drawResultImage(resultTextures["Failure"], width, height); break;
+                }
+            }
+        }
         int width, height;
         glfwGetFramebufferSize(window, &width, &height);
         drawGaugeUI(width, height);
