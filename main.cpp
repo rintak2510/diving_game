@@ -3,7 +3,7 @@
 #ifdef __APPLE__
 #define GL_SILENCE_DEPRECATION
 #include <GL/glew.h>
-#include <GL/glut.h>
+#define GLFW_INCLUDE_GLU
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
