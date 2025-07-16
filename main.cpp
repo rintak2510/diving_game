@@ -45,9 +45,13 @@ int spinCount = 0;
 float velocityY = 0.0f;
 float velocityZ = 0.2f;
 float playerRotationSpeed = 0.0f;
+float jumpElapsedTime = 0.0f;
+float airtime = 0.0f;
+float totalRotation = 0.0f;
 const float waterY = 0.0f;
 
 bool jumpSuccess = true;
+bool jumpStarted = false;
 
 bool loadModel(const std::string& filename) {
     tinyobj::attrib_t attrib;
@@ -301,26 +305,27 @@ void updateGame(GLFWwindow* window, float deltaTime) {
             spinTimer += deltaTime;
             int zone = static_cast<int>(spinTimer / 0.6f);
             spinCount = zone % 6;
+
             if (zone > 6 || glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
-                // ジャンプ条件チェック
                 jumpSuccess = true;
                 float upperLimit = 305.0f;
                 float lowerLimitPerSpin = 12.0f;
+
                 if (jumpGauge * spinCount > upperLimit)
-                    jumpGauge = upperLimit / std::max(spinCount, 1);
+                    jumpSuccess = false;
                 if (jumpGauge < lowerLimitPerSpin * spinCount)
                     jumpSuccess = false;
 
                 currentState = GameState::Jumping;
                 velocityY = jumpSuccess ? jumpGauge * 0.05f : 0.0f;
 
+                // ← airtimeとtotalRotationをジャンプ開始時に確定させる
                 if (jumpSuccess) {
                     float g = 9.8f;
-                    float airtime = 2.0f * velocityY / g;
-                    float totalRotation = 360.0f * spinCount;
+                    airtime = 2.0f * velocityY / g;
+                    totalRotation = 360.0f * spinCount;
                     player.rotationX = 0.0f;
-                    playerRotationSpeed = totalRotation / airtime;
-                    // playerRotationSpeed を使わず、後で airtime と jumpElapsedTime で制御
+                    jumpElapsedTime = 0.0f; // 初期化
                 } else {
                     playerRotationSpeed = 0.0f;
                 }
@@ -328,18 +333,12 @@ void updateGame(GLFWwindow* window, float deltaTime) {
             break;
         }
 
-        case GameState::Jumping:
-        case GameState::Falling: {
-            static float jumpElapsedTime = 0.0f;
-            static float airtime = 0.0f;
-            static float totalRotation = 0.0f;
-            static bool initialized = false;
-
-            if (!initialized) {
+        case GameState::Jumping: {
+            if (!jumpStarted) {
                 airtime = 2.0f * velocityY / 9.8f;
                 totalRotation = 360.0f * spinCount;
                 jumpElapsedTime = 0.0f;
-                initialized = true;
+                jumpStarted = true;
             }
 
             velocityY -= deltaTime * 9.8f;
@@ -352,10 +351,27 @@ void updateGame(GLFWwindow* window, float deltaTime) {
                 player.rotationX = totalRotation * (t / airtime);
             }
 
+            // 落下に転じたらFallingへ遷移
+            if (velocityY < 0.0f) {
+                currentState = GameState::Falling;
+            }
+
+            break;
+        }
+
+        case GameState::Falling: {
+            velocityY -= deltaTime * 9.8f;
+            player.position.y += velocityY * deltaTime;
+            player.position.z += velocityZ * deltaTime;
+
+            if (jumpSuccess) {
+                jumpElapsedTime += deltaTime;
+                float t = std::min(jumpElapsedTime, airtime);
+                player.rotationX = totalRotation * (t / airtime);
+            }
+
             if (player.position.y <= -1.0f) {
                 player.position.y = -1.0f;
-                playerRotationSpeed = 0.0f;
-                initialized = false;
                 currentState = GameState::Result;
                 std::cout << "Result: " << (jumpSuccess ? (spinCount == 0 ? "Fail" : std::to_string(spinCount) + "回転") : "回転失敗") << std::endl;
             }
